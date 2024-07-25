@@ -14,6 +14,8 @@
 package internal
 
 import (
+	"net"
+
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
 )
@@ -81,6 +83,16 @@ func (m *MockNetlinkOps) AddRedirectFilter(sourceLink netlink.Link, targetLink n
 
 // GetRedirectFilter does nothing and returns an error if configured to do so (otherwise nil)
 func (m *MockNetlinkOps) GetRedirectFilter(sourceLink netlink.Link, targetLink netlink.Link) (netlink.Filter, error) {
+	return nil, m.GetRedirectFilterErr
+}
+
+// AddNatFilter does nothing and returns an error if configured to do so (otherwise nil)
+func (m *MockNetlinkOps) AddNatFilter(link netlink.Link, oldAddr, newAddr net.IP, direction netlink.NatDirection) error {
+	return m.AddRedirectFilterErr
+}
+
+// GetNatFilter does nothing and returns an error if configured to do so (otherwise nil)
+func (m *MockNetlinkOps) GetNatFilter(link netlink.Link, oldAddr net.IP) (netlink.Filter, error) {
 	return nil, m.GetRedirectFilterErr
 }
 

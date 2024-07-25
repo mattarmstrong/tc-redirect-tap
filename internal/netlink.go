@@ -16,8 +16,10 @@ package internal
 import (
 	"errors"
 	"fmt"
+	"net"
 
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 )
 
@@ -60,6 +62,9 @@ type NetlinkOps interface {
 	// GetRedirectFilter looks for a u32 redirect filter matching the one added by
 	// AddRedirectFilter, returning it if found. If not found, it returns a FilterNotFoundError
 	GetRedirectFilter(sourceLink netlink.Link, targetLink netlink.Link) (netlink.Filter, error)
+
+	AddNatFilter(link netlink.Link, oldAddr, newAddr net.IP, direction netlink.NatDirection) error
+	GetNatFilter(link netlink.Link, oldAddr net.IP) (netlink.Filter, error)
 
 	// GetLink returns the netlink.Link for the device with the provided name, or a
 	// LinkNotFoundError if no such device is found in the network namespace in which the call is
@@ -134,6 +139,7 @@ func (ops defaultNetlinkOps) AddRedirectFilter(sourceLink netlink.Link, targetLi
 			LinkIndex: sourceLink.Attrs().Index,
 			Parent:    RootFilterHandle(),
 			Protocol:  unix.ETH_P_ALL,
+			Priority:  3,
 		},
 		Actions: []netlink.Action{
 			&netlink.MirredAction{
@@ -173,6 +179,79 @@ func (ops defaultNetlinkOps) GetRedirectFilter(sourceLink netlink.Link, targetLi
 	}
 
 	return nil, &FilterNotFoundError{device: sourceLink.Attrs().Name}
+}
+
+func (ops defaultNetlinkOps) AddNatFilter(link netlink.Link, oldAddr, newAddr net.IP, direction netlink.NatDirection) error {
+	err := netlink.FilterAdd(&netlink.U32{
+		FilterAttrs: netlink.FilterAttrs{
+			LinkIndex: link.Attrs().Index,
+			Parent:    RootFilterHandle(),
+			Protocol:  unix.ETH_P_ALL,
+			Priority:  2,
+		},
+		Actions: []netlink.Action{
+			&netlink.NatAction{
+				ActionAttrs: netlink.ActionAttrs{
+					Action: netlink.TC_ACT_UNSPEC,
+				},
+				OldAddr:   oldAddr,
+				NewAddr:   newAddr,
+				Mask:      net.IPMask{255, 255, 255, 255},
+				Direction: direction,
+			},
+		},
+	})
+	if err != nil {
+		err = fmt.Errorf(
+			"failed to add u32 filter nat from %s to %s, does %q exist and have a qdisc attached to its ingress?",
+			oldAddr.String(), newAddr.String(), link.Attrs().Name,
+		)
+		return err
+	}
+
+	if direction == netlink.TCA_NAT_INGRESS {
+		if err := netlink.FilterAdd(&netlink.Flower{
+			FilterAttrs: netlink.FilterAttrs{
+				LinkIndex: link.Attrs().Index,
+				Parent:    RootFilterHandle(),
+				Protocol:  unix.ETH_P_ARP,
+				Priority:  1,
+			},
+			EthType: unix.ETH_P_ARP,
+			ArpOp:   nl.TCA_FLOWER_ARPOP_REQUEST,
+			Actions: []netlink.Action{
+				&netlink.GenericAction{
+					ActionAttrs: netlink.ActionAttrs{
+						Action: netlink.TC_ACT_OK,
+					},
+				},
+			},
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (ops defaultNetlinkOps) GetNatFilter(link netlink.Link, oldAddr net.IP) (netlink.Filter, error) {
+	filters, err := netlink.FilterList(link, RootFilterHandle())
+	if err != nil {
+		return nil, fmt.Errorf("failed to list filters for device %q: %w", link.Attrs().Name, err)
+	}
+
+	for _, filter := range filters {
+		u32Filter, ok := filter.(*netlink.U32)
+		if !ok {
+			continue
+		}
+
+		if u32Filter.RedirIndex == 0 {
+			return u32Filter, nil
+		}
+	}
+
+	return nil, &FilterNotFoundError{device: link.Attrs().Name}
 }
 
 func (defaultNetlinkOps) GetLink(name string) (netlink.Link, error) {

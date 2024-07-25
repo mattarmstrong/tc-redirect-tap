@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/utils/buildversion"
 	"github.com/hashicorp/go-multierror"
+	"github.com/vishvananda/netlink"
 
 	pluginargs "github.com/awslabs/tc-redirect-tap/cmd/tc-redirect-tap/args"
 	"github.com/awslabs/tc-redirect-tap/internal"
@@ -161,6 +163,17 @@ func newPlugin(args *skel.CmdArgs) (*plugin, error) {
 		plugin.tapGID = tapGID
 	}
 
+	if tapAddressVal, wasDefined := parsedArgs[pluginargs.TCRedirectTapAddress]; wasDefined {
+		ipAddr, ipNet, err := net.ParseCIDR(tapAddressVal)
+		if err != nil {
+			return nil, fmt.Errorf("tapAddr should be an IPv4 CIDR, got %q: %w", tapAddressVal, err)
+		}
+		plugin.tapAddress = net.IPNet{
+			IP:   ipAddr,
+			Mask: ipNet.Mask,
+		}
+	}
+
 	return plugin, nil
 }
 
@@ -207,6 +220,10 @@ type plugin struct {
 	// tapGID is the gid of the group-owner of the tap device
 	tapGID int
 
+	// IP of the interface inside the VM. If it's different than the redirect interface
+	// IP, a NAT action is added to the tc filter.
+	tapAddress net.IPNet
+
 	// redirectInterfaceName is the name of the device that the tap device will have a
 	// u32 redirect filter pair with. It's provided by the client via the CNI runtime
 	// config "IfName" parameter
@@ -246,6 +263,18 @@ func (p plugin) add() error {
 			return err
 		}
 
+		if p.tapAddress.IP.To4() != nil {
+			for _, redirectIP := range redirectIPs {
+				if err := p.AddNatFilter(tapLink, p.tapAddress.IP, redirectIP.Address.IP, netlink.TCA_NAT_EGRESS); err != nil {
+					return err
+				}
+
+				if err := p.AddNatFilter(redirectLink, redirectIP.Address.IP, p.tapAddress.IP, netlink.TCA_NAT_INGRESS); err != nil {
+					return err
+				}
+			}
+		}
+
 		err = p.AddRedirectFilter(tapLink, redirectLink)
 		if err != nil {
 			return err
@@ -279,10 +308,14 @@ func (p plugin) add() error {
 		vmIfaceIndex := len(p.currentResult.Interfaces) - 1
 
 		for _, redirectIP := range redirectIPs {
+			addr := redirectIP.Address
+			if p.tapAddress.IP != nil {
+				addr = p.tapAddress
+			}
 			// Add the IP configuration that should be applied to the VM internally by
 			// associating the IPConfig with the vmIface. We use the redirectIface's IP.
 			p.currentResult.IPs = append(p.currentResult.IPs, &current.IPConfig{
-				Address:   redirectIP.Address,
+				Address:   addr,
 				Gateway:   redirectIP.Gateway,
 				Interface: &vmIfaceIndex,
 			})

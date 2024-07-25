@@ -18,3 +18,5 @@ require (
 	github.com/vishvananda/netns v0.0.4 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/vishvananda/netlink v1.2.1-beta.2 => github.com/mattarmstrong/netlink v0.0.0-20240725014824-83d041cdfb9b
